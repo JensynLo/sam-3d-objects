@@ -4,7 +4,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from functools import partial
-from loguru import logger
 
 from .point_remapper import PointRemapper
 

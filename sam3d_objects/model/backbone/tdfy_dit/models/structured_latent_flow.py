@@ -9,7 +9,7 @@ from ..modules.transformer import AbsolutePositionEmbedder
 from ..modules.norm import LayerNorm32
 from ..modules import sparse as sp
 from ..modules.sparse.transformer import ModulatedSparseTransformerCrossBlock
-from .sparse_structure_flow import TimestepEmbedder
+from .timestep_embedder import TimestepEmbedder
 
 
 class SparseResBlock3d(nn.Module):

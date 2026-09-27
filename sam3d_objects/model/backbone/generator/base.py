@@ -61,5 +61,3 @@ class Base(torch.nn.Module):
     ):
         raise NotImplementedError
 
-    def loss(self, x, *args_conditionals, **kwargs_conditionals):
-        raise NotImplementedError

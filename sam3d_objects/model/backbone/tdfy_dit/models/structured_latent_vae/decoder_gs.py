@@ -1,5 +1,4 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-import os
 from typing import *
 import torch
 import torch.nn as nn
@@ -8,8 +7,6 @@ from ...modules import sparse as sp
 from ...utils.random_utils import hammersley_sequence
 from .base import SparseTransformerBase
 from ...representations import Gaussian
-from safetensors.torch import load_file
-from loguru import logger
 
 
 class SLatGaussianDecoder(SparseTransformerBase):
@@ -158,22 +155,5 @@ class SLatGaussianDecoder(SparseTransformerBase):
 
 
 class SLatGaussianDecoderTdfyWrapper(SLatGaussianDecoder):
-    def __init__(self, *args, **kwargs):
-        pretrained_ckpt_path = kwargs.pop("pretrained_ckpt_path", None)
-        super().__init__(*args, **kwargs)
-        if pretrained_ckpt_path is not None:
-            if os.path.exists(pretrained_ckpt_path):
-                logger.info(
-                    f"Loading pretrained slat decoder gs from  {pretrained_ckpt_path}"
-                )
-                file_type = os.path.splitext(pretrained_ckpt_path)[1]
-                if file_type == ".safetensors":
-                    self.load_state_dict(load_file(pretrained_ckpt_path))
-                else:
-                    self.load_state_dict(
-                        torch.load(pretrained_ckpt_path, weights_only=True)
-                    )
-            else:
-                raise FileNotFoundError(
-                    f"The path for slat decoder gs does not exist: {pretrained_ckpt_path}"
-                )
+    """Name referenced by the released yaml configs. Weights are loaded by
+    sam3d_objects.pipeline.inference from ./ckpts, never from inside the model."""

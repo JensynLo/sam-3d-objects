@@ -1,17 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 from typing import *
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 from ...modules.utils import zero_module, convert_module_to_f16, convert_module_to_f32
 from ...modules import sparse as sp
 from .base import SparseTransformerBase
 from ...representations import MeshExtractResult
 from ...representations.mesh import SparseFeatures2Mesh
-import os
-from safetensors.torch import load_file
-from loguru import logger
 
 
 class SparseSubdivideBlock3d(nn.Module):
@@ -190,11 +184,5 @@ class SLatMeshDecoder(SparseTransformerBase):
 
 
 class SLatMeshDecoderTdfyWrapper(SLatMeshDecoder):
-    def __init__(self, *args, **kwargs):
-        pretrained_ckpt_path = kwargs.pop("pretrained_ckpt_path", None)
-        super().__init__(*args, **kwargs)
-        if pretrained_ckpt_path is not None and os.path.exists(pretrained_ckpt_path):
-            logger.info(
-                f"Loading pretrained slat decoder gs from {pretrained_ckpt_path}"
-            )
-            self.load_state_dict(load_file(pretrained_ckpt_path))
+    """Name referenced by the released yaml configs. Weights are loaded by
+    sam3d_objects.pipeline.inference from ./ckpts, never from inside the model."""

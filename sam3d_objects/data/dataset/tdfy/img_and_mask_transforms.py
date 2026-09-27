@@ -1,43 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 from collections import namedtuple
-import random
-from typing import Optional, Dict
+from typing import Optional
 
 import numpy as np
-import matplotlib.pyplot as plt
-import torchvision.transforms.functional
-from sam3d_objects.data.dataset.tdfy.img_processing import pad_to_square_centered
-from sam3d_objects.model.backbone.dit.embedder.point_remapper import PointRemapper
-from typing import Optional, Dict
-from loguru import logger
 import torch
-import torch.nn.functional as F
 import torchvision
-import torchvision.transforms as tv_transforms
 import torchvision.transforms.functional
-import torchvision.transforms.functional as TF
-
-from sam3d_objects.data.dataset.tdfy.img_processing import pad_to_square_centered
-
-
-def UNNORMALIZE(mean, std):
-    mean = torch.tensor(mean).reshape((3, 1, 1))
-    std = torch.tensor(std).reshape((3, 1, 1))
-
-    def unnormalize_img(img):
-        assert img.ndim == 3 and img.shape[0] == 3
-
-        return img * std.to(img.device) + mean.to(img.device)
-
-    return unnormalize_img
-
-
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-
-
-IMAGENET_NORMALIZATION = tv_transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)
-IMAGENET_UNNORMALIZATION = UNNORMALIZE(IMAGENET_MEAN, IMAGENET_STD)
+from loguru import logger
 
 
 class BoundingBoxError(Exception):
@@ -47,64 +16,6 @@ class BoundingBoxError(Exception):
 def check_bounding_box(bbox_w, bbox_h):
     if bbox_w < 2 or bbox_h < 2:
         raise BoundingBoxError("Bounding box dimensions must be at least 2x2.")
-
-
-class RGBAImageProcessor:
-    def __init__(
-        self,
-        resize_and_make_square_kwargs: Optional[Dict] = None,
-        object_crop_kwargs: Optional[Dict] = None,
-        remove_background: bool = False,
-        imagenet_normalization: bool = False,
-    ):
-        self.remove_background = remove_background
-        self.resize_and_pad_kwargs = resize_and_make_square_kwargs
-        self.object_crop_kwargs = object_crop_kwargs
-        self.imagenet_normalization = imagenet_normalization
-        if resize_and_make_square_kwargs is not None:
-            self.transforms = resize_and_make_square(**resize_and_make_square_kwargs)
-
-    def __call__(
-        self, image: torch.Tensor, mask: Optional[torch.Tensor] = None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if mask is None:
-            assert (
-                image.shape[0] == 4
-            ), f"Requires 4 channels (RGB + alpha), got {image.shape[0]=}"
-            image, mask = split_rgba(image)
-        else:
-            assert (
-                image.shape[0] == 3
-            ), f"Requires 3 channels (RGB), got {image.shape[0]=}"
-            assert mask.dim() == 2, f"Requires 2D mask, got {mask.dim()=}"
-
-        if not self.object_crop_kwargs in [None, False]:
-            image, mask = crop_around_mask_with_padding(
-                image, mask, **self.object_crop_kwargs
-            )
-
-        if self.remove_background:
-            image, mask = rembg(image, mask)
-
-        image = self.transforms["img_transform"](image)
-        mask = self.transforms["mask_transform"](mask.unsqueeze(0))
-
-        if self.imagenet_normalization:
-            image = IMAGENET_NORMALIZATION(image)
-        return image, mask
-
-
-def load_rgb(fpath: str) -> torch.Tensor:
-    """
-    Load a RGB(A) image from a file path.
-    """
-    image = plt.imread(fpath)  # Why use matplotlib?
-    if image.dtype == "uint8":
-        image = image / 255
-        image = image.astype(np.float32)
-    image = torch.from_numpy(image)
-    image = image.permute(2, 0, 1).contiguous()
-    return image
 
 
 def concat_rgba(
@@ -176,87 +87,6 @@ def get_mask(
         mask = mask.squeeze(0)
 
     return mask
-
-
-def rembg(image, mask, pointmap=None):
-    """
-    Remove the background from an image using a mask.
-    For pointmaps, sets background regions to NaN.
-
-    This function follows the standard transform pattern:
-    - If called with (image, mask), returns (image, mask)
-    - If called with (image, mask, pointmap), returns (image, mask, pointmap)
-    """
-    masked_image = image * mask
-
-    if pointmap is not None:
-        masked_pointmap = torch.where(mask > 0, pointmap, torch.nan)
-        return masked_image, mask, masked_pointmap
-
-    return masked_image, mask
-
-
-def resize_and_make_square(
-    img_size: int,
-    make_square: bool | str = False,
-):
-    """
-    Create image and mask transforms based on configuration.
-
-    Returns:
-        dict: {"img_transform": img_transform, "mask_transform": mask_transform}
-    """
-    if isinstance(make_square, str):
-        make_square = make_square.lower()
-    assert make_square in ["pad", "crop", False]
-    pre_resize_transform = tv_transforms.Lambda(lambda x: x)
-    post_resize_transform = tv_transforms.Lambda(lambda x: x)
-    if make_square == "pad":
-        pre_resize_transform = pad_to_square_centered
-    elif make_square == "crop":
-        post_resize_transform = tv_transforms.CenterCrop(img_size)
-
-    img_resize = tv_transforms.Resize(img_size)
-    mask_resize = tv_transforms.Resize(
-        img_size,
-        interpolation=tv_transforms.InterpolationMode.BILINEAR,
-    )
-
-    img_transform = tv_transforms.Compose(
-        [
-            pre_resize_transform,
-            img_resize,
-            post_resize_transform,
-        ]
-    )
-
-    mask_transform = tv_transforms.Compose(
-        [
-            pre_resize_transform,
-            mask_resize,
-            post_resize_transform,
-        ]
-    )
-
-    return {
-        "img_transform": img_transform,
-        "mask_transform": mask_transform,
-    }
-
-
-def crop_around_mask_with_random_box_size_factor(
-    loaded_image: torch.Tensor,
-    mask: torch.Tensor,
-    random_box_size_factor: float = 1.0,
-    pointmap: Optional[torch.Tensor] = None,
-) -> np.ndarray:
-    return crop_around_mask_with_padding(
-        loaded_image,
-        mask,
-        box_size_factor=1.0 + random.uniform(0, 1) * random_box_size_factor,
-        padding_factor=0.0,
-        pointmap=pointmap,
-    )
 
 
 def crop_around_mask_with_padding(
@@ -499,21 +329,10 @@ def resize_all_to_same_size(
 
 SSINormalizedPointmap = namedtuple("SSINormalizedPointmap", ["pointmap", "scale", "shift"])
 class SSIPointmapNormalizer:
+    """Interface: normalize(pointmap, mask, scale=None, shift=None) -> SSINormalizedPointmap."""
 
-    def normalize(self, pointmap: torch.Tensor, mask: torch.Tensor,
-        scale: Optional[torch.Tensor] = None, shift: Optional[torch.Tensor] = None,
-    ) -> SSINormalizedPointmap:
-        if scale is None or shift is None:
-            normalized_pointmap, scale, shift = normalize_pointmap_ssi(pointmap)
-        else:
-            assert scale.shape == (3,) and shift.shape == (3,), "scale and shift must be in (3,) format"
-            normalized_pointmap = _apply_metric_to_ssi(pointmap, scale, shift)
-        return SSINormalizedPointmap(normalized_pointmap, scale, shift)
-    
-    def denormalize(self, pointmap: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
-        pointmap = _apply_metric_to_ssi(pointmap, scale, shift, apply_inverse=True)
-        return pointmap
-
+    def normalize(self, pointmap, mask, scale=None, shift=None) -> SSINormalizedPointmap:
+        raise NotImplementedError
 
 
 class ObjectCentricSSI(SSIPointmapNormalizer):
@@ -615,372 +434,23 @@ class ObjectCentricSSI(SSIPointmapNormalizer):
         return SSINormalizedPointmap(pointmap_normalized, return_scale, return_shift)
 
 
-class ObjectApparentSizeSSI(SSIPointmapNormalizer):
-    def __init__(self,
-            clip_beyond_scale: Optional[float] = None,
-            use_scene_scale: bool = True, 
-            scale_factor: float = 1.0, # e^(1.337); empirical mean of R3+Artist train
-        ):
-        self.clip_beyond_scale = clip_beyond_scale
-        self.use_scene_scale = use_scene_scale
-        self.scale_factor = scale_factor
+def _apply_metric_to_ssi(pointmap: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+    """Metric -> scale/shift-invariant space: (p - shift) / scale, for a (3, H, W) pointmap.
 
-    def _get_scale_and_shift(self, pointmap: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        pointmap_size = (pointmap.shape[1], pointmap.shape[2])
-        pointmap_flat = pointmap.reshape(3, -1)
-
-        if not self.use_scene_scale:
-            # Get valid points from the mask
-            mask_resized = torchvision.transforms.functional.resize(
-                mask, pointmap_size,
-                interpolation=torchvision.transforms.InterpolationMode.NEAREST
-            ).squeeze(0)
-            mask_bool = mask_resized.reshape(-1) > 0.5
-            pointmap_flat = pointmap_flat[:, mask_bool]
-
-        # Median z-distance
-        median_z = pointmap_flat[-1, ...].nanmedian().unsqueeze(0)
-        scale = median_z.expand(3) * self.scale_factor
-        shift = torch.zeros_like(scale)
-        # logger.info(f'median z = {median_z}')
-        return scale, shift
-
-    def normalize(self,
-        pointmap: torch.Tensor,
-        mask: torch.Tensor,
-        scale: Optional[torch.Tensor] = None,
-        shift: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert pointmap.shape[0] == 3, "pointmap must be in (3, H, W) format"
-        pointmap_size = (pointmap.shape[1], pointmap.shape[2])
-
-        if scale is None or shift is None:
-            scale, shift = self._get_scale_and_shift(pointmap, mask)
-        else:
-            assert scale.shape == (3,) and shift.shape == (3,), "scale and shift must be in (3,) format"
-
-        # Apply normalization and clip
-        pointmap_normalized = _apply_metric_to_ssi(pointmap, scale, shift)
-        # logger.info(f"{pointmap_normalized.shape=}")
-        
-        if self.clip_beyond_scale is not None and self.clip_beyond_scale > 0:
-            pointmap_normalized = torch.where(
-                pointmap_normalized[-1, ...] > self.clip_beyond_scale,
-                torch.full_like(pointmap_normalized, float('nan')),
-                pointmap_normalized
-            )
-        
-        # return pointmap_normalized, scale, shift
-        return SSINormalizedPointmap(pointmap_normalized, scale, shift)
-
-
-class NormalizedDisparitySpaceSSI(SSIPointmapNormalizer):
-    def __init__(self,
-        clip_beyond_scale: Optional[float] = None,
-        use_scene_scale: bool = True,
-        log_disparity_shift: float = 0.0,
-    ):
-        self.clip_beyond_scale = clip_beyond_scale
-        self.use_scene_scale = use_scene_scale
-        self.point_remapper = PointRemapper(remap_type="exp_disparity")
-        self.log_disparity_shift = log_disparity_shift
-
-    def normalize(self, pointmap: torch.Tensor, mask: torch.Tensor,
-        scale: Optional[torch.Tensor] = None, shift: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert pointmap.shape[0] == 3, "pointmap must be in (3, H, W) format"
-
-
-        disparity_space_pointmap = self.point_remapper.forward(pointmap.permute(1, 2, 0)).permute(2, 0, 1)
-        if scale is None or shift is None:
-            scale, shift = self._get_scale_and_shift(disparity_space_pointmap, mask)
-        else:
-            assert scale.shape == (3,) and shift.shape == (3,), "scale and shift must be in (3,) format"
-
-        # pointmap_normalized = pointmap.clone().detach()
-        pointmap_normalized = _apply_metric_to_ssi(disparity_space_pointmap, scale, shift)
-        # logger.info(f"{pointmap_normalized.shape=}")
-        
-        if self.clip_beyond_scale is not None and self.clip_beyond_scale > 0:
-            pointmap_normalized = torch.where(
-                pointmap_normalized[2, ...].abs() > self.clip_beyond_scale,
-                torch.full_like(pointmap_normalized, float('nan')),
-                pointmap_normalized
-            )
-        
-        # return pointmap_normalized, scale, shift
-        return SSINormalizedPointmap(pointmap_normalized, scale, shift)
-    
-    def denormalize(self, pointmap: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
-        pointmap = _apply_metric_to_ssi(pointmap, scale, shift, apply_inverse=True)
-        pointmap = self.point_remapper.inverse(pointmap.permute(1, 2, 0)).permute(2, 0, 1)
-        return pointmap
-
-    def _get_scale_and_shift(self, pointmap: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        pointmap_size = (pointmap.shape[1], pointmap.shape[2])
-        mask_resized = torchvision.transforms.functional.resize(
-            mask, pointmap_size,
-            interpolation=torchvision.transforms.InterpolationMode.NEAREST
-        ).squeeze(0)
-
-        pointmap_flat = pointmap.reshape(3, -1)
-        if self.use_scene_scale:
-            median_z = pointmap_flat[-1, ...].nanmedian().unsqueeze(0)
-            shift = torch.zeros_like(median_z.expand(3))
-            shift[-1, ...] = median_z[0] + self.log_disparity_shift
-        else:
-            # Get valid points from the mask (shift, x/z, y/z, log(z))
-            mask_bool = mask_resized.reshape(-1) > 0.5
-            pointmap_flat = pointmap_flat[:, mask_bool]
-            shift = pointmap_flat.nanmedian(dim=-1).values
-
-        scale = torch.ones_like(shift)
-        # logger.info(f'median z = {median_z}')
-        return scale, shift
-
-def normalize_pointmap_ssi(pointmap: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    Written as the same homogeneous 4x4 products PyTorch3D's
+    `Transform3d().scale(scale).translate(shift).inverse().transform_points(...)`
+    performs (row-vector convention), so results -- including how non-finite
+    points turn into NaN -- match the released pipeline without needing pytorch3d.
     """
-    Normalize pointmap using Scale-Shift Invariant (SSI) normalization.
-    
-    Args:
-        pointmap: Pointmap tensor of shape (H, W, 3) or (3, H, W)
-        
-    Returns:
-        Tuple of (normalized_pointmap, scale, shift)
-    """
-    from sam3d_objects.data.dataset.tdfy.pose_target import ScaleShiftInvariant
-    
-    # Convert to (H, W, 3) if needed for get_scale_and_shift
-    if pointmap.shape[0] == 3:
-        pointmap_hw3 = pointmap.permute(1, 2, 0)
-        original_format = 'chw'
-    else:
-        pointmap_hw3 = pointmap
-        original_format = 'hwc'
-    
-    # Get scale and shift using existing method
-    scale, shift = ScaleShiftInvariant.get_scale_and_shift(pointmap_hw3)
-    
-    pointmap_normalized = _apply_metric_to_ssi(pointmap, scale, shift)
-    return pointmap_normalized, scale, shift
+    assert pointmap.shape[0] == 3, "pointmap must be in (3, H, W) format"
+    scale, shift = scale.reshape(3), shift.reshape(3)
+    inv_translate = torch.eye(4, dtype=shift.dtype, device=shift.device)
+    inv_translate[3, :3] = -shift
+    inv_scale = torch.diag(torch.cat([1.0 / scale, scale.new_ones(1)])).to(shift.device)
+    matrix = torch.eye(4, dtype=shift.dtype, device=shift.device)[None].bmm(inv_translate[None]).bmm(inv_scale[None])
 
-def _apply_metric_to_ssi(pointmap: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, apply_inverse: bool = False) -> torch.Tensor:
-    """
-    Normalize pointmap using Scale-Shift Invariant (SSI) normalization.
-    
-    Args:
-        pointmap: Pointmap tensor of shape (H, W, 3) or (3, H, W)
-        
-    Returns:
-        Tuple of (normalized_pointmap, scale, shift)
-    """
-    from sam3d_objects.data.dataset.tdfy.pose_target import ScaleShiftInvariant
-    
-    # Convert to (H, W, 3) if needed for get_scale_and_shift
-    if pointmap.shape[0] == 3:
-        pointmap_hw3 = pointmap.permute(1, 2, 0)
-        original_format = 'chw'
-    else:
-        pointmap_hw3 = pointmap
-        original_format = 'hwc'
-    
-    # Apply normalization
-    ssi_to_metric = ScaleShiftInvariant.ssi_to_metric(scale, shift)
-    metric_to_ssi = ssi_to_metric.inverse()
-    transform_to_apply = metric_to_ssi
-
-    if apply_inverse:
-        transform_to_apply = ssi_to_metric
-
-    pointmap_flat = pointmap_hw3.reshape(-1, 3)
-    pointmap_normalized = transform_to_apply.transform_points(pointmap_flat)
-    
-    # Reshape back to original format
-    if original_format == 'chw':
-        pointmap_normalized = pointmap_normalized.reshape(pointmap.shape[1], pointmap.shape[2], 3).permute(2, 0, 1)
-    else:
-        pointmap_normalized = pointmap_normalized.reshape(pointmap_hw3.shape)
-    
-    return pointmap_normalized
-
-
-def perturb_mask_translation(
-    image: torch.Tensor,
-    mask: torch.Tensor,
-    max_px_delta: int = 5,
-):
-    """
-    Applies data augmentation to the mask by randomly translating the mask.
-
-    Args:
-        image: (C, H, W) float32 [0, 1] tensor.
-        mask: (1, H, W) float32 [0, 1] tensor.
-        max_px_delta: The maximum number of pixels we will randomly shift by in each 2D direction.
-    """
-    dx = random.randint(-max_px_delta, max_px_delta)
-    dy = random.randint(-max_px_delta, max_px_delta)
-
-    mask = mask.squeeze(0)
-    mask = torch.roll(mask, shifts=(dy, dx), dims=(0, 1))
-    
-    # Zero out wrapped regions
-    if dy > 0:
-        mask[:dy, :] = 0
-    elif dy < 0:
-        mask[dy:, :] = 0
-    if dx > 0:
-        mask[:, :dx] = 0
-    elif dx < 0:
-        mask[:, dx:] = 0
-    
-    mask = mask.unsqueeze(0)
-    return image, mask
-
-
-def perturb_mask_boundary(
-    image: torch.Tensor,
-    mask: torch.Tensor,
-    kernel_range: tuple[int, int] = (2, 5),
-    p_erode: float = 0.1,
-    p_dilate: float = 0.8,
-    **kwargs,
-):
-    """
-    Applies data augmentation to the mask by randomly eroding or dilating the mask.
-
-    Args:
-        image: (C, H, W) float32 [0, 1] tensor.
-        mask: (1, H, W) float32 [0, 1] tensor.
-        kernel_range: Range of kernel sizes to sample from.
-        p_erode: Probability of erosion.
-        p_dilate: Probability of dilation.
-        kwargs: Kwargs for the cv2 erode/dilate function.
-    """
-    import cv2
-
-    C, H, W = image.shape
-    assert mask.shape == (1, H, W)
-    assert mask.dtype == torch.float32
-    assert torch.all((mask == 0) | (mask == 1)), "Mask must be binary (0 or 1)"
-
-    p_none = 1.0 - p_erode - p_dilate
-    assert 0 <= p_none <= 1, "Probabilities must sum to 1 and be valid."
-
-    # Sample operation.
-    op = random.choices(["erode", "dilate", "none"], weights=[p_erode, p_dilate, p_none], k=1)[0]
-    
-    if op == "none":
-        pass
-    else:
-        # Sample kernel size
-        ksize = random.randint(*kernel_range)
-        kernel = np.ones((ksize, ksize), np.uint8)
-
-        mask = mask.squeeze().cpu().numpy().astype(np.uint8)  # (H, W)
-
-        if op == "erode":
-            mask = cv2.erode(mask, kernel, **kwargs)
-        elif op == "dilate":
-            mask = cv2.dilate(mask, kernel, **kwargs)
-        else:
-            raise NotImplementedError
-
-        mask = torch.from_numpy(mask).float()[None]  # (1, H, W)
-
-    return image, mask
-
-
-def resolution_blur(
-    image: torch.Tensor,
-    mask: torch.Tensor,
-    scale_range=(0.05, 0.95),
-    interpolation_down=tv_transforms.InterpolationMode.BICUBIC,
-    interpolation_up=tv_transforms.InterpolationMode.BICUBIC,
-):
-    """
-    Blur the input image by applying upsample(downsample(x)).
-
-    Args:
-        image (torch.Tensor): Image tensor of shape (C, H, W), float32, with values in [0, 1].
-        mask (torch.Tensor): Mask tensor of shape (1, H, W), float32, with values in [0, 1]. The mask is returned unchanged.
-        scale_range: Tuple of (min_scale, max_scale) for downsampling.
-        interpolation_down: Interpolation mode for downsampling.
-        interpolation_up: Interpolation mode for upsampling.
-    """
-    C, H, W = image.shape
-    scale = random.uniform(*scale_range)
-    new_H, new_W = max(1, int(H * scale)), max(1, int(W * scale))
-
-    # Downsample
-    image = TF.resize(image, size=[new_H, new_W], interpolation=interpolation_down)
-    
-    # Upsample back to original size
-    image = TF.resize(image, size=[H, W], interpolation=interpolation_up)
-
-    return image, mask
-
-
-def gaussian_blur(
-    image: torch.Tensor,
-    mask: torch.Tensor,
-    kernel_range: tuple[int, int] = (3, 15),
-    sigma_range: tuple[int, int] = (0.1, 4.0),
-):
-    """
-    Apply gaussian blur to the input image.
-
-    Args:
-        image (torch.Tensor): Image tensor of shape (C, H, W), float32, with values in [0, 1].
-        mask (torch.Tensor): Mask tensor of shape (1, H, W), float32, with values in [0, 1]. The mask is returned unchanged.
-        kernel_range (tuple): Range of odd kernel sizes to sample from for the Gaussian blur (min, max).
-        sigma_range (tuple): Range of sigma values (standard deviation) to sample from for the Gaussian kernel (min, max).
-    """
-    kernel_size = random.choice([k for k in range(kernel_range[0], kernel_range[1]+1) if k % 2 == 1])
-    sigma = random.uniform(*sigma_range)
-    pad = kernel_size // 2
-
-    # Step 1: Pad the image
-    image = F.pad(image.unsqueeze(0), (pad, pad, pad, pad), mode='replicate')
-    
-    # Step 2: Apply gaussian blur
-    image = TF.gaussian_blur(image, kernel_size=[kernel_size, kernel_size], sigma=sigma)
-    
-    # Step 3: Unpad to get back to original size
-    image = image[:, :, pad:-pad, pad:-pad]
-    
-    return image.squeeze(0), mask
-
-
-def apply_blur_augmentation(
-    image: torch.Tensor,
-    mask: torch.Tensor,
-    p_resolution: float = 0.33,
-    p_gaussian: float = 0.33,
-    gaussian_kwargs: dict = None,
-    resolution_kwargs: dict = None,
-):
-    """Apply blur augmentation with configurable parameters"""
-    
-    # Handle None defaults BEFORE unpacking
-    if gaussian_kwargs is None:
-        gaussian_kwargs = {}
-    if resolution_kwargs is None:
-        resolution_kwargs = {}
-    
-    p_none = 1.0 - p_gaussian - p_resolution
-    assert 0 <= p_none <= 1, "Probabilities must sum to 1 and be valid."
-    
-    operation = random.choices(
-        ["gaussian", "resolution", "none"], 
-        weights=[p_gaussian, p_resolution, p_none], 
-        k=1
-    )[0]
-    
-    if operation == "gaussian":
-        return gaussian_blur(image, mask, **gaussian_kwargs)
-    elif operation == "resolution":
-        return resolution_blur(image, mask, **resolution_kwargs)
-    elif operation == "none":
-        return image, mask
-    else:
-        raise NotImplementedError
+    points = pointmap.permute(1, 2, 0).reshape(1, -1, 3)
+    points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+    points = points.bmm(matrix)
+    points = points[..., :3] / points[..., 3:]
+    return points.reshape(pointmap.shape[1], pointmap.shape[2], 3).permute(2, 0, 1)
