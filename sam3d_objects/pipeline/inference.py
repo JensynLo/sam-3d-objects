@@ -25,6 +25,7 @@ from omegaconf import OmegaConf
 from sam3d_objects import paths
 from sam3d_objects.data.dataset.tdfy.img_and_mask_transforms import get_mask
 from sam3d_objects.model.backbone.tdfy_dit.modules import sparse as sp
+from sam3d_objects.pipeline import pose as pose_utils
 from sam3d_objects.pipeline.sparse_structure import (
     downsample_sparse_structure,
     prune_sparse_structure,
@@ -77,6 +78,7 @@ class Sam3DPipeline:
         self.slat_mean = torch.tensor(list(cfg.slat_mean))
         self.slat_std = torch.tensor(list(cfg.slat_std))
         self._rng = None
+        self.last_pose = None
 
     # ------------------------------------------------------------------ loading
     @contextmanager
@@ -145,7 +147,10 @@ class Sam3DPipeline:
         keys = ["mask", "image", "rgb_image", "rgb_image_mask"]
         if pointmap is not None:
             keys += ["pointmap", "rgb_pointmap"]
-        return {k: item[k][None].to(self.device) for k in keys}
+        out = {k: item[k][None].to(self.device) for k in keys}
+        # Normalisation moments of the pointmap: not a model input, needed to decode the pose.
+        moments = {k: item[k][None].to(self.device) for k in ("pointmap_scale", "pointmap_shift") if k in item}
+        return out, moments
 
     def compute_pointmap(self, rgba: np.ndarray) -> torch.Tensor:
         image = torch.from_numpy(rgba[..., :3].astype(np.float32) / 255).permute(2, 0, 1).contiguous()
@@ -157,7 +162,8 @@ class Sam3DPipeline:
 
     # ------------------------------------------------------------------- stages
     @torch.no_grad()
-    def sample_sparse_structure(self, ss_input: dict) -> torch.Tensor:
+    def sample_sparse_structure(self, ss_input: dict):
+        """Returns (coords, pose latents, downsample_factor)."""
         opt = self.opt
         builders = dict(
             stage=lambda: self._load_generator_stage("ss_generator"),
@@ -182,6 +188,7 @@ class Sam3DPipeline:
                 cond = embedder(**ss_input)
                 latents = generator(latent_shapes, self.device, cond)
                 shape_latent = latents["shape"]
+                pose_latents = {k: v.float() for k, v in latents.items() if k != "shape"}
                 occupancy = decoder(
                     shape_latent.permute(0, 2, 1).contiguous().view(bs, 8, 16, 16, 16)
                 )
@@ -193,9 +200,12 @@ class Sam3DPipeline:
             raise RuntimeError("Sparse structure is empty; check the input mask.")
         if opt["downsample_ss_dist"] > 0:
             coords = prune_sparse_structure(coords, max_neighbor_axes_dist=opt["downsample_ss_dist"])
-        coords, _ = downsample_sparse_structure(coords)
-        logger.info(f"Sparse structure: {n_voxels} voxels -> {coords.shape[0]} active coords")
-        return coords
+        coords, downsample_factor = downsample_sparse_structure(coords)
+        logger.info(
+            f"Sparse structure: {n_voxels} voxels -> {coords.shape[0]} active coords"
+            f" (downsample factor {downsample_factor})"
+        )
+        return coords, pose_latents, downsample_factor
 
     @torch.no_grad()
     def sample_slat(self, slat_input: dict, coords: torch.Tensor) -> sp.SparseTensor:
@@ -226,18 +236,39 @@ class Sam3DPipeline:
                 return m["decoder"](slat)[0]
 
     # ---------------------------------------------------------------------- run
-    def run(self, rgba: np.ndarray, output_format: str, seed: Optional[int] = 42):
+    def run(self, rgba: np.ndarray, output_format: str, seed: Optional[int] = 42, apply_pose: bool = True):
         """rgba: (H, W, 4) uint8, alpha channel = object mask.
-        Returns a `Gaussian` or a `MeshExtractResult` in the object's canonical frame."""
+        Returns a `Gaussian` or a `MeshExtractResult`, placed in the PyTorch3D camera frame
+        (x left, y up, z forward) by the decoded pose, as the demo's `make_scene` does.
+        With apply_pose=False it stays in the canonical frame (unit cube at the origin).
+        The decoded pose is kept in `self.last_pose`."""
         assert output_format in FORMATS, output_format
         assert rgba.ndim == 3 and rgba.shape[-1] == 4 and rgba.dtype == np.uint8
         with self.device:
             pointmap = self.compute_pointmap(rgba)
-            ss_input = self._preprocess(rgba, self.ss_preprocessor, pointmap=pointmap)
-            slat_input = self._preprocess(rgba, self.slat_preprocessor)
+            ss_input, moments = self._preprocess(rgba, self.ss_preprocessor, pointmap=pointmap)
+            slat_input, _ = self._preprocess(rgba, self.slat_preprocessor)
             if seed is not None:
                 torch.manual_seed(seed)
             self._rng = (torch.get_rng_state(), torch.cuda.get_rng_state(self.device))
-            coords = self.sample_sparse_structure(ss_input)
+            coords, pose_latents, downsample_factor = self.sample_sparse_structure(ss_input)
+            # Downsampled coords span a 1/factor smaller cube; the scale compensates.
+            pose = pose_utils.decode_pose(
+                pose_latents, moments["pointmap_scale"], moments["pointmap_shift"], downsample_factor
+            )
+            self.last_pose = pose
+            logger.info(
+                f"Pose: scale={pose.scale[0, 0].item():.4f} translation={pose.translation[0].tolist()}"
+                f" rotation={pose.rotation[0].tolist()}"
+            )
             slat = self.sample_slat(slat_input, coords)
-            return self.decode_slat(slat, output_format)
+            result = self.decode_slat(slat, output_format)
+            if not apply_pose:
+                result.frame = "canonical"
+                return result
+            if output_format == "gaussian":
+                pose_utils.apply_pose_gaussian(result, pose)
+            else:
+                pose_utils.apply_pose_mesh(result, pose)
+            result.frame = "camera"
+            return result

@@ -22,7 +22,10 @@ python infer.py <image> <3dgs|mesh> <output_dir> [--mask mask.png] [--seed 42]
 | `3dgs\|mesh` | `3dgs` -> `<output_dir>/<image stem>.ply` (standard 3DGS ply), `mesh` -> `<output_dir>/<image stem>.glb` (vertex colours) |
 | `output_dir` | created if missing                                                        |
 
-The result is in the object's canonical frame (unit cube centred at the origin).
+The result is placed in the camera frame by the stage-1 pose (rotation / translation / scale,
+decoded as upstream's `ScaleShiftInvariant` pose decoder and applied like the demo's `make_scene`):
+PyTorch3D camera convention, x left, y up, z forward, metric units of the MoGe pointmap.
+`Sam3DPipeline.run(..., apply_pose=False)` keeps the canonical frame (unit cube at the origin).
 The mesh is the raw FlexiCubes extraction with vertex colours, i.e. exactly what the
 official demo returns (`with_mesh_postprocess=False, with_texture_baking=False`).
 
