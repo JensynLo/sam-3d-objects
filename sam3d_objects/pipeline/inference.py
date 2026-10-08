@@ -158,6 +158,12 @@ class Sam3DPipeline:
             with torch.no_grad(), torch.autocast(device_type="cuda", dtype=self.dtype):
                 points = m["depth"](image)["pointmaps"]  # (H, W, 3)
         points = points * _MOGE_TO_P3D.to(points)
+        # MoGe returns +-inf where it sees no depth (e.g. a plain white background).
+        # Everything downstream treats NaN as "no point" (nanmedian in the SSI moments,
+        # NaN padding, the pointmap embedder's validity mask), but not inf: one inf-heavy
+        # background makes the scene scale inf, zeroes the object points after
+        # normalisation and makes the decoded pose inf.
+        points = torch.where(points.isfinite(), points, torch.full_like(points, float("nan")))
         return points.permute(2, 0, 1)
 
     # ------------------------------------------------------------------- stages
